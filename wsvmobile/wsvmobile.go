@@ -5,61 +5,103 @@ import (
 	"github.com/eycorsican/go-tun2socks/common/log"
 	"github.com/eycorsican/go-tun2socks/common/log/simple"
 	"github.com/eycorsican/go-tun2socks/core"
+	"github.com/sunny-lan/wsv/common"
+	"github.com/sunny-lan/wsv/wsvmobile/wsconnector"
 	"io"
 	"os"
 	"syscall"
 )
 
 var lwipStack core.LWIPStack
+var wsConn *wsconnector.WsConnector
+var klist common.KillList
 var running = false
 
 var (
-	errInvalidFD      = errors.New("invalid FD")
-	errAlreadyRunning = errors.New("already running")
-	errNotRunning     = errors.New("not running")
+	ErrInvalidFD      = errors.New("invalid FD")
+	ErrAlreadyRunning = errors.New("already running")
+	ErrNotRunning     = errors.New("not running")
 )
 
 // Begin begins piping information from the given tun file descriptor
 // to the given proxy host through ws
+// It blocks until the one of the following happens:
+// If requested to close through the Close method, returns nil
+// Otherwise returns an error if irrecoverable (TUN failed)
 func Begin(tunFD int64, proxyHost string) error {
 	log.RegisterLogger(simple.NewSimpleLogger())
 	log.SetLevel(log.INFO)
-	log.Infof("Go code running")
 
 	if running {
-		return errAlreadyRunning
+		return ErrAlreadyRunning
 	}
+
 	running = true
+	log.Infof("Go code running")
 
-	var f = os.NewFile(uintptr(tunFD), "tunFD")
+	klist = common.NewKillList()
+	defer klist.KillAll()
 
-	if f == nil {
+	var tun = os.NewFile(uintptr(tunFD), "tunFD")
+	if tun == nil {
 		log.Errorf("invalid tunFD")
-		return errInvalidFD
+		return ErrInvalidFD
 	}
-	var s = newTcpUdpHandler(proxyHost)
+	klist.AddKiller(tun, func() {
+		log.Infof("Go: Killing tun")
+		e := tun.Close()
+		if e != nil {
+			log.Errorf("unable to close tun %v", e)
+		}
+		e = syscall.Close(int(tunFD))
+		if e != nil {
+			log.Errorf("unable to close tun through syscall %v", e)
+		}
+	})
+
+	wsConn = wsconnector.NewWsConnector(proxyHost)
+	klist.AddKiller(wsConn, func() {
+		wsConn.Close()
+		wsConn = nil
+	})
+
 	lwipStack = core.NewLWIPStack()
-	core.RegisterTCPConnHandler(s)
-	core.RegisterUDPConnHandler(s)
-	core.RegisterOutputFn(f.Write)
+	klist.AddKiller(lwipStack, func() {
+		e := lwipStack.Close()
+		if e != nil {
+			log.Errorf("unable to close lwipStack %v", e)
+		}
+		lwipStack = nil
+	})
 
-	_, e := io.Copy(lwipStack, f)
-	log.Infof("Go code exit %v", e)
+	core.RegisterTCPConnHandler(wsConn)
+	core.RegisterUDPConnHandler(wsConn)
+	core.RegisterOutputFn(tun.Write)
 
-	return e
+	_, e := io.Copy(lwipStack, tun)
+
+	if running {
+		log.Errorf("Go Unexpected exit %v", e)
+		return e
+	} else {
+		log.Infof("Go Expected exit, %v", e)
+		return nil
+	}
 }
 
-// Close closes the current connection to proxy server, killing and cleaning everything
+// Close closes the current connection to proxy server, closing the following:
+// TCP stack, TUN file descriptor, existing ws connections
+// it DOES NOT return errors which occur during closing the stack or tun
 func Close() error {
 	if !running {
-		return errNotRunning
+		return ErrNotRunning
 	}
-	e := lwipStack.Close()
-	lwipStack = nil
-	return e
+	log.Infof("Go stack requested to stop")
+	running = false
+	klist.KillAll()
+	return nil
 }
 
-// CloseFD closes the specified file descriptor
-func CloseFD(tunFD int) error {
-	return syscall.Close(tunFD)
+func CloseFD(fd int) error {
+	return syscall.Close(fd)
 }
