@@ -3,6 +3,7 @@ package wsconnector
 import (
 	"github.com/eycorsican/go-tun2socks/common/log"
 	"github.com/gorilla/websocket"
+	"github.com/sunny-lan/wsv/common"
 	"io"
 	"net"
 )
@@ -10,13 +11,18 @@ import (
 func (t WsConnector) Handle(tcp net.Conn, target *net.TCPAddr) error {
 	log.Infof("tcp connect %v\n", target.String())
 
+	t.Stats.TcpStats.AddConnection()
+
 	t.klist.AddKiller(tcp, func() {
 		e := tcp.Close()
 		if e != nil {
 			log.Errorf("failed to close tcp ws %v", e)
 		}
+
+		t.Stats.TcpStats.RemoveConnection()
 	})
 
+	t.Stats.WsStats.AddConnection()
 	ws, _, e := websocket.DefaultDialer.Dial(t.server, nil)
 	if e != nil {
 		log.Errorf("failed do dial %v", e)
@@ -29,6 +35,8 @@ func (t WsConnector) Handle(tcp net.Conn, target *net.TCPAddr) error {
 		if e != nil {
 			log.Errorf("failed to close tcp tcp %v", e)
 		}
+
+		t.Stats.WsStats.RemoveConnection()
 	})
 
 	m := &msg{
@@ -50,7 +58,11 @@ func (t WsConnector) Handle(tcp net.Conn, target *net.TCPAddr) error {
 
 		buf := make([]byte, 32*1024)
 		for {
-			_, r, e := ws.NextReader()
+			nr, r, e := ws.NextReader()
+			t.Stats.WsStats.Update(func(stats *common.ConnStats) {
+				stats.ReadLoops++
+				stats.BytesRead += int64(nr)
+			})
 			if e != nil {
 				if e, ok := e.(*websocket.CloseError); ok {
 					log.Debugf("tcp ws connection closed")
@@ -60,7 +72,11 @@ func (t WsConnector) Handle(tcp net.Conn, target *net.TCPAddr) error {
 				return
 			}
 
-			_, e = io.CopyBuffer(tcp, r, buf)
+			nw, e := io.CopyBuffer(tcp, r, buf)
+			t.Stats.TcpStats.Update(func(stats *common.ConnStats) {
+				stats.WriteLoops++
+				stats.BytesWritten += nw
+			})
 			if e != nil {
 				log.Errorf("failed write tcp tcp %v", e)
 				return
@@ -76,6 +92,10 @@ func (t WsConnector) Handle(tcp net.Conn, target *net.TCPAddr) error {
 		buf := make([]byte, 32*1024)
 		for {
 			n, e := tcp.Read(buf)
+			t.Stats.TcpStats.Update(func(stats *common.ConnStats) {
+				stats.ReadLoops++
+				stats.BytesRead += int64(n)
+			})
 			if e != nil {
 				if e == io.EOF {
 					return //tunnel close
@@ -86,10 +106,15 @@ func (t WsConnector) Handle(tcp net.Conn, target *net.TCPAddr) error {
 			}
 
 			e = ws.WriteMessage(websocket.BinaryMessage, buf[:n])
+			t.Stats.WsStats.Update(func(stats *common.ConnStats) {
+				stats.WriteLoops++
+				stats.BytesWritten += int64(n)
+			})
 			if e != nil {
 				log.Errorf("failed do write ws %v", e)
 				return
 			}
+
 		}
 	}()
 

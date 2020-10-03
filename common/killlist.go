@@ -2,6 +2,7 @@ package common
 
 import "sync"
 
+//TODO replace with Once
 type KillList struct {
 	killers *sync.Map
 }

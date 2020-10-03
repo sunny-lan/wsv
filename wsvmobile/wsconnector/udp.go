@@ -5,13 +5,26 @@ import (
 	"github.com/eycorsican/go-tun2socks/common/log"
 	"github.com/eycorsican/go-tun2socks/core"
 	"github.com/gorilla/websocket"
+	"github.com/sunny-lan/wsv/common"
+	"io"
 	"net"
 	"sync"
 )
 
+type udpWrap struct {
+	udp    core.UDPConn
+	target *net.UDPAddr
+}
+
+func (u udpWrap) Write(p []byte) (n int, err error) {
+	return u.udp.WriteFrom(p, u.target)
+}
+
 // Connect connects the proxy server. Note that target can be nil.
 func (t WsConnector) Connect(udp core.UDPConn, target *net.UDPAddr) error {
 	log.Debugf("UDP connect %v", target.String())
+
+	t.Stats.UdpStats.AddConnection()
 
 	t.klist.AddKiller(udp, func() {
 		t.udpWs.Delete(udp)
@@ -20,7 +33,11 @@ func (t WsConnector) Connect(udp core.UDPConn, target *net.UDPAddr) error {
 		if e != nil {
 			log.Errorf("failed to close udp tun %v", e)
 		}
+
+		t.Stats.UdpStats.RemoveConnection()
 	})
+
+	t.Stats.WsStats.AddConnection()
 
 	ws, _, e := websocket.DefaultDialer.Dial(t.server, nil)
 	if e != nil {
@@ -38,6 +55,8 @@ func (t WsConnector) Connect(udp core.UDPConn, target *net.UDPAddr) error {
 		if e != nil {
 			log.Errorf("failed to close udp ws %v", e)
 		}
+
+		t.Stats.WsStats.RemoveConnection()
 	})
 
 	m := &msg{
@@ -64,29 +83,38 @@ func (t WsConnector) Connect(udp core.UDPConn, target *net.UDPAddr) error {
 		defer t.klist.Kill(ws)
 		defer t.klist.Kill(udp)
 
+		wrapped := udpWrap{
+			udp:    udp,
+			target: target,
+		}
+		buf := make([]byte, 1024*32)
 		for {
-			tp, b, e := ws.ReadMessage()
+			tp, r, e := ws.NextReader()
 			if e != nil {
-				if e, ok := e.(*websocket.CloseError); ok {
+				if _, ok := e.(*websocket.CloseError); ok {
 					log.Debugf("udp ws connection closed")
 				} else {
 					log.Errorf("failed to read message from udp ws %v", e)
 				}
 				return
 			}
-
 			if tp != websocket.BinaryMessage {
 				log.Errorf("unexpected udp message type from ws")
 				return
 			}
+			n, e := io.CopyBuffer(wrapped, r, buf)
 
-			for len(b) > 0 {
-				n, e := udp.WriteFrom(b, target)
-				if e != nil {
-					log.Errorf("failed to write to tun from udp ws %v", e)
-					return
-				}
-				b = b[n:]
+			t.Stats.WsStats.Update(func(stats *common.ConnStats) {
+				stats.ReadLoops++
+				stats.BytesRead += n
+			})
+			t.Stats.UdpStats.Update(func(stats *common.ConnStats) {
+				stats.WriteLoops++
+				stats.BytesWritten += n
+			})
+			if e != nil {
+				log.Errorf("failed to write to tun from udp ws %v", e)
+				return
 			}
 		}
 	}()
@@ -95,6 +123,11 @@ func (t WsConnector) Connect(udp core.UDPConn, target *net.UDPAddr) error {
 
 // ReceiveTo will be called when data arrives from TUN.
 func (t WsConnector) ReceiveTo(udp core.UDPConn, data []byte, addr *net.UDPAddr) error {
+	t.Stats.UdpStats.Update(func(stats *common.ConnStats) {
+		stats.ReadLoops++
+		stats.BytesRead += int64(len(data))
+	})
+
 	log.Debugf("udp to %v", addr.String())
 	v, ok := t.udpWs.Load(udp)
 	if !ok {
@@ -108,21 +141,26 @@ func (t WsConnector) ReceiveTo(udp core.UDPConn, data []byte, addr *net.UDPAddr)
 		Dst:     addr.String(),
 		Port:    addr.Port,
 	}
+
 	lws.lock.Lock()
+	defer lws.lock.Unlock()
+
 	e := lws.ws.WriteJSON(m)
-	lws.lock.Unlock()
 	if e != nil {
 		log.Errorf("failed do send udp header to lws %v", e)
 		return e
 	}
 
-	lws.lock.Lock()
 	e = lws.ws.WriteMessage(websocket.BinaryMessage, data)
-	lws.lock.Unlock()
 	if e != nil {
 		log.Errorf("failed do send udp to lws %v", e)
 		return e
 	}
+
+	t.Stats.WsStats.Update(func(stats *common.ConnStats) {
+		stats.WriteLoops += 2
+		stats.BytesWritten += int64(len(data))
+	})
 
 	return nil
 }

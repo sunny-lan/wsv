@@ -12,12 +12,14 @@ type lockedWs struct {
 	ws   *websocket.Conn
 }
 
+//TODO split into udp vs tcp
 //WsConnector handles connections from tun converting them to websocket
 type WsConnector struct {
 	server       string
 	udpWs        *sync.Map
 	writeTimeout time.Duration //TODO actually have timeout
 	klist        common.KillList
+	Stats        *WsConnStats
 }
 
 // msg is a general purpose struct use to send control messages to the server
@@ -35,8 +37,9 @@ func NewWsConnector(server string) *WsConnector {
 	return &WsConnector{
 		server,
 		&sync.Map{},
-		time.Second * 5, //TODO actually use this.
+		time.Second * 5,
 		common.NewKillList(),
+		NewWsConnStats(),
 	}
 }
 
