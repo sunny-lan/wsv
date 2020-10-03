@@ -5,7 +5,6 @@ import (
 	"github.com/eycorsican/go-tun2socks/common/log"
 	"github.com/eycorsican/go-tun2socks/core"
 	"github.com/gorilla/websocket"
-	"github.com/sunny-lan/wsv/common"
 	"io"
 	"net"
 	"sync"
@@ -24,7 +23,7 @@ func (u udpWrap) Write(p []byte) (n int, err error) {
 func (t WsConnector) Connect(udp core.UDPConn, target *net.UDPAddr) error {
 	log.Debugf("UDP connect %v", target.String())
 
-	t.Stats.UdpStats.AddConnection()
+	t.Stats.udpStats.AddConnection()
 
 	t.klist.AddKiller(udp, func() {
 		t.udpWs.Delete(udp)
@@ -34,10 +33,10 @@ func (t WsConnector) Connect(udp core.UDPConn, target *net.UDPAddr) error {
 			log.Errorf("failed to close udp tun %v", e)
 		}
 
-		t.Stats.UdpStats.RemoveConnection()
+		t.Stats.udpStats.RemoveConnection()
 	})
 
-	t.Stats.WsStats.AddConnection()
+	t.Stats.wsStats.AddConnection()
 
 	ws, _, e := websocket.DefaultDialer.Dial(t.server, nil)
 	if e != nil {
@@ -56,7 +55,7 @@ func (t WsConnector) Connect(udp core.UDPConn, target *net.UDPAddr) error {
 			log.Errorf("failed to close udp ws %v", e)
 		}
 
-		t.Stats.WsStats.RemoveConnection()
+		t.Stats.wsStats.RemoveConnection()
 	})
 
 	m := &msg{
@@ -103,15 +102,8 @@ func (t WsConnector) Connect(udp core.UDPConn, target *net.UDPAddr) error {
 				return
 			}
 			n, e := io.CopyBuffer(wrapped, r, buf)
-
-			t.Stats.WsStats.Update(func(stats *common.ConnStats) {
-				stats.ReadLoops++
-				stats.BytesRead += n
-			})
-			t.Stats.UdpStats.Update(func(stats *common.ConnStats) {
-				stats.WriteLoops++
-				stats.BytesWritten += n
-			})
+			t.Stats.wsStats.RecordRead(n)
+			t.Stats.udpStats.RecordWrite(n)
 			if e != nil {
 				log.Errorf("failed to write to tun from udp ws %v", e)
 				return
@@ -123,10 +115,7 @@ func (t WsConnector) Connect(udp core.UDPConn, target *net.UDPAddr) error {
 
 // ReceiveTo will be called when data arrives from TUN.
 func (t WsConnector) ReceiveTo(udp core.UDPConn, data []byte, addr *net.UDPAddr) error {
-	t.Stats.UdpStats.Update(func(stats *common.ConnStats) {
-		stats.ReadLoops++
-		stats.BytesRead += int64(len(data))
-	})
+	t.Stats.udpStats.RecordRead(int64(len(data)))
 
 	log.Debugf("udp to %v", addr.String())
 	v, ok := t.udpWs.Load(udp)
@@ -157,10 +146,7 @@ func (t WsConnector) ReceiveTo(udp core.UDPConn, data []byte, addr *net.UDPAddr)
 		return e
 	}
 
-	t.Stats.WsStats.Update(func(stats *common.ConnStats) {
-		stats.WriteLoops += 2
-		stats.BytesWritten += int64(len(data))
-	})
+	t.Stats.wsStats.RecordWrite(int64(len(data)))
 
 	return nil
 }

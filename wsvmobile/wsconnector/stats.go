@@ -4,22 +4,41 @@ import (
 	"github.com/sunny-lan/wsv/common"
 )
 
-type WsConnStats struct {
-	UdpStats *common.ConnStats
-	TcpStats *common.ConnStats
-	WsStats  *common.ConnStats
+type WsConnStatsReader interface {
+	UDP() common.ConnStatsReader
+	TCP() common.ConnStatsReader
+	WS() common.ConnStatsReader
+	ResetCounters()
 }
 
-func NewWsConnStats() *WsConnStats {
-	return &WsConnStats{
+type wsConnStats struct {
+	udpStats *common.ConnStats
+	tcpStats *common.ConnStats
+	wsStats  *common.ConnStats
+}
+
+func (s *wsConnStats) UDP() common.ConnStatsReader {
+	return s.udpStats
+}
+
+func (s *wsConnStats) TCP() common.ConnStatsReader {
+	return s.tcpStats
+}
+
+func (s *wsConnStats) WS() common.ConnStatsReader {
+	return s.wsStats
+}
+
+func newWsConnStats() *wsConnStats {
+	return &wsConnStats{
 		common.NewConnStats(),
 		common.NewConnStats(),
 		common.NewConnStats(),
 	}
 }
 
-func (s WsConnStats) ResetCounters() {
-	s.UdpStats.ResetCounters()
-	s.TcpStats.ResetCounters()
-	s.WsStats.ResetCounters()
+func (s *wsConnStats) ResetCounters() {
+	s.udpStats.ResetCounters()
+	s.tcpStats.ResetCounters()
+	s.wsStats.ResetCounters()
 }

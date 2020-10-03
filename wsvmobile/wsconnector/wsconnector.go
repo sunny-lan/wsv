@@ -19,7 +19,7 @@ type WsConnector struct {
 	udpWs        *sync.Map
 	writeTimeout time.Duration //TODO actually have timeout
 	klist        common.KillList
-	Stats        *WsConnStats
+	Stats        *wsConnStats
 }
 
 // msg is a general purpose struct use to send control messages to the server
@@ -39,7 +39,7 @@ func NewWsConnector(server string) *WsConnector {
 		&sync.Map{},
 		time.Second * 5,
 		common.NewKillList(),
-		NewWsConnStats(),
+		newWsConnStats(),
 	}
 }
 

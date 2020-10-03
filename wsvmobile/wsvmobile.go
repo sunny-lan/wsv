@@ -15,6 +15,7 @@ import (
 var lwipStack core.LWIPStack
 var wsConn *wsconnector.WsConnector
 var running = false
+var wrappedTun io.ReadCloser
 
 var (
 	errInvalidFD      = errors.New("invalid FD")
@@ -23,9 +24,6 @@ var (
 )
 
 //TODO settings controller
-var wrappedStats *wsConnStatsWrapper
-
-var wrappedTun io.ReadCloser
 
 // Begin begins piping information from the given tun file descriptor
 // to the given proxy host through ws
@@ -75,11 +73,6 @@ func Begin(tunFD int64, proxyHost string) error {
 		wrappedTun = nil
 	}()
 
-	wrappedStats = newWsConnStatsWrapper(wsConn.Stats)
-	defer func() {
-		wrappedStats = nil
-	}()
-
 	_, e := io.Copy(lwipStack, wrappedTun)
 
 	if e != nil {
@@ -105,6 +98,6 @@ func CloseFD(fd int) error {
 	return syscall.Close(fd)
 }
 
-func Stats() WsvStats {
-	return wrappedStats
+func Stats() wsconnector.WsConnStatsReader {
+	return wsConn.Stats
 }
