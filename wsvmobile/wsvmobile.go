@@ -2,6 +2,7 @@ package wsvmobile
 
 import (
 	"errors"
+	"fmt"
 	"github.com/eycorsican/go-tun2socks/common/log"
 	"github.com/eycorsican/go-tun2socks/common/log/simple"
 	"github.com/eycorsican/go-tun2socks/core"
@@ -49,7 +50,10 @@ func Begin(tunFD int64, proxyHost string) error {
 		return errInvalidFD
 	}
 
-	wsConn = wsconnector.NewWsConnector(proxyHost)
+	wsConn, e := wsconnector.NewWsConnector(proxyHost)
+	if e != nil {
+		return e
+	}
 	defer func() {
 		wsConn.Close()
 		wsConn = nil
@@ -73,14 +77,15 @@ func Begin(tunFD int64, proxyHost string) error {
 		wrappedTun = nil
 	}()
 
-	_, e := io.Copy(lwipStack, wrappedTun)
+	_, e = io.Copy(lwipStack, wrappedTun)
 
 	if e != nil {
 		log.Errorf("Go Unexpected exit with error: %v", e)
-	} else {
-		log.Infof("Go Expected exit with error: %v", e)
+		return fmt.Errorf("enexpected error while reading from TUN %w. go killed", e)
 	}
-	return e
+
+	log.Infof("Go Expected exit with error: %v", e)
+	return nil
 }
 
 // Close closes the current connection to proxy server, closing the following:

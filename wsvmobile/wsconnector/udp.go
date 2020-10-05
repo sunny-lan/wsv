@@ -19,13 +19,13 @@ func (u udpWrap) Write(p []byte) (n int, err error) {
 	return u.udp.WriteFrom(p, u.target)
 }
 
-// Connect connects the proxy server. Note that target can be nil.
+// Connect connects the proxy originalServer. Note that target can be nil.
 func (t WsConnector) Connect(udp core.UDPConn, target *net.UDPAddr) error {
 	log.Debugf("UDP connect %v", target.String())
 
 	t.Stats.udpStats.AddConnection()
 
-	t.klist.AddKiller(udp, func() {
+	t.kList.AddKiller(udp, func() {
 		t.udpWs.Delete(udp)
 
 		e := udp.Close()
@@ -38,16 +38,16 @@ func (t WsConnector) Connect(udp core.UDPConn, target *net.UDPAddr) error {
 
 	t.Stats.wsStats.AddConnection()
 
-	ws, _, e := websocket.DefaultDialer.Dial(t.server, nil)
+	ws, _, e := t.dialWs()
 	if e != nil {
 		log.Errorf("failed do dial udp ws %v", e)
-		t.klist.Kill(udp)
+		t.kList.Kill(udp)
 		return e
 	}
 
 	lock := &sync.Mutex{}
 
-	t.klist.AddKiller(ws, func() {
+	t.kList.AddKiller(ws, func() {
 		lock.Lock()
 		e := ws.Close()
 		lock.Unlock()
@@ -68,8 +68,8 @@ func (t WsConnector) Connect(udp core.UDPConn, target *net.UDPAddr) error {
 	lock.Unlock()
 	if e != nil {
 		log.Errorf("failed do init udp ws %v", e)
-		t.klist.Kill(udp)
-		t.klist.Kill(ws)
+		t.kList.Kill(udp)
+		t.kList.Kill(ws)
 		return e
 	}
 
@@ -79,8 +79,8 @@ func (t WsConnector) Connect(udp core.UDPConn, target *net.UDPAddr) error {
 	})
 
 	go func() {
-		defer t.klist.Kill(ws)
-		defer t.klist.Kill(udp)
+		defer t.kList.Kill(ws)
+		defer t.kList.Kill(udp)
 
 		wrapped := udpWrap{
 			udp:    udp,

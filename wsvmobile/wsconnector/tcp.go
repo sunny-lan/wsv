@@ -12,7 +12,7 @@ func (t WsConnector) Handle(tcp net.Conn, target *net.TCPAddr) error {
 
 	t.Stats.tcpStats.AddConnection()
 
-	t.klist.AddKiller(tcp, func() {
+	t.kList.AddKiller(tcp, func() {
 		e := tcp.Close()
 		if e != nil {
 			log.Errorf("failed to close tcp ws %v", e)
@@ -22,14 +22,14 @@ func (t WsConnector) Handle(tcp net.Conn, target *net.TCPAddr) error {
 	})
 
 	t.Stats.wsStats.AddConnection()
-	ws, _, e := websocket.DefaultDialer.Dial(t.server, nil)
+	ws, _, e := t.dialWs()
 	if e != nil {
 		log.Errorf("failed do dial %v", e)
-		t.klist.Kill(tcp)
+		t.kList.Kill(tcp)
 		return e
 	}
 
-	t.klist.AddKiller(ws, func() {
+	t.kList.AddKiller(ws, func() {
 		e = ws.Close()
 		if e != nil {
 			log.Errorf("failed to close tcp tcp %v", e)
@@ -45,21 +45,21 @@ func (t WsConnector) Handle(tcp net.Conn, target *net.TCPAddr) error {
 	e = ws.WriteJSON(m)
 	if e != nil {
 		log.Errorf("failed do send init tcp connection %v", e)
-		t.klist.Kill(tcp)
-		t.klist.Kill(ws)
+		t.kList.Kill(tcp)
+		t.kList.Kill(ws)
 		return e
 	}
 
 	//ws->tcp
 	go func() {
-		defer t.klist.Kill(tcp)
-		defer t.klist.Kill(ws)
+		defer t.kList.Kill(tcp)
+		defer t.kList.Kill(ws)
 
 		buf := make([]byte, 32*1024)
 		for {
 			tp, r, e := ws.NextReader()
 			if e != nil {
-				if e, ok := e.(*websocket.CloseError); ok {
+				if _, ok := e.(*websocket.CloseError); ok {
 					log.Debugf("tcp ws connection closed")
 				} else {
 					log.Errorf("failed read ws tcp %v", e)
@@ -83,8 +83,8 @@ func (t WsConnector) Handle(tcp net.Conn, target *net.TCPAddr) error {
 
 	//tcp->ws
 	go func() {
-		defer t.klist.Kill(tcp)
-		defer t.klist.Kill(ws)
+		defer t.kList.Kill(tcp)
+		defer t.kList.Kill(ws)
 
 		buf := make([]byte, 32*1024)
 		for {
