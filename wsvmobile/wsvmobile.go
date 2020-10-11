@@ -6,6 +6,7 @@ import (
 	"github.com/eycorsican/go-tun2socks/common/log"
 	"github.com/eycorsican/go-tun2socks/common/log/simple"
 	"github.com/eycorsican/go-tun2socks/core"
+	"github.com/imdario/mergo"
 	"github.com/sunny-lan/wsv/common"
 	"github.com/sunny-lan/wsv/wsvmobile/wsconnector"
 	"io"
@@ -24,19 +25,31 @@ var (
 	errNotRunning     = errors.New("not running")
 )
 
-//TODO settings controller
+type WsConnSettings wsconnector.Settings
+
+type Settings struct {
+	WsConnectionSettings *WsConnSettings
+}
+
+var defaultSettings = Settings{}
 
 // Begin begins piping information from the given tun file descriptor
 // to the given proxy host through ws
 // It blocks until the one of the following happens:
 // If requested to close through the Close method, returns nil
 // Otherwise returns an error if irrecoverable (TUN failed)
-func Begin(tunFD int64, proxyHost string) error {
+func Begin(tunFD int64, proxyHost string, settings *Settings) error {
 	log.RegisterLogger(simple.NewSimpleLogger())
 	log.SetLevel(log.INFO)
 
 	if running {
 		return errAlreadyRunning
+	}
+
+	var cpy = defaultSettings
+	e := mergo.Merge(&cpy, settings, mergo.WithOverride)
+	if e != nil {
+		panic(fmt.Errorf("merge wsv settings failed %w", e))
 	}
 
 	running = true
@@ -50,7 +63,7 @@ func Begin(tunFD int64, proxyHost string) error {
 		return errInvalidFD
 	}
 
-	wsConn, e := wsconnector.NewWsConnector(proxyHost)
+	wsConn, e := wsconnector.NewWsConnector(proxyHost, (*wsconnector.Settings)(settings.WsConnectionSettings))
 	if e != nil {
 		return e
 	}

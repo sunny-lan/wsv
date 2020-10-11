@@ -3,16 +3,17 @@ package wsconnector
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"flag"
+	"encoding/pem"
 	"fmt"
 	"github.com/eycorsican/go-tun2socks/common/log"
 	"github.com/gorilla/websocket"
+	"github.com/imdario/mergo"
 	"github.com/sunny-lan/wsv/common"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 type lockedWs struct {
@@ -20,21 +21,21 @@ type lockedWs struct {
 	ws   *websocket.Conn
 }
 
-type settings struct {
-	connectTimeout time.Duration //TODO actually have timeout
-	bufferSize     int64
-	trustedCerts   []byte
+type Settings struct {
+	//Timeout is the timeout in milliseconds
+	Timeout      int64
+	BufferSize   int64
+	TrustedCerts []byte
 }
 
+//TODO split ws logic with connection logic
 //TODO use errorf for everything
-//TODO split into udp vs tcp
 //WsConnector handles connections from tun converting them to websocket
 type WsConnector struct {
 	Stats *wsConnStats
 
-	udpWs    *sync.Map
-	settings settings
-	kList    common.KillList //TODO use once
+	udpWs *sync.Map
+	kList common.KillList //TODO use once
 
 	dialLock       *sync.Mutex
 	concurrentMode *atomic.Value
@@ -123,9 +124,7 @@ func (t *WsConnector) dialWs() (*websocket.Conn, *http.Response, error) {
 	}
 }
 
-func trustCert(cert []byte) *tls.Config {
-	insecure := flag.Bool("insecure-ssl", false, "Accept/Ignore all originalServer SSL certificates")
-	flag.Parse()
+func trustCert(pemCerts []byte) *tls.Config {
 
 	// Get the SystemCertPool, continue with an empty pool on error
 	rootCAs, _ := x509.SystemCertPool()
@@ -133,36 +132,58 @@ func trustCert(cert []byte) *tls.Config {
 		rootCAs = x509.NewCertPool()
 	}
 
-	// Append our cert to the system pool
-	if ok := rootCAs.AppendCertsFromPEM(cert); !ok {
-		log.Infof("No certs appended, using system certs only")
+	for len(pemCerts) > 0 {
+		var block *pem.Block
+		block, pemCerts = pem.Decode(pemCerts)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			continue
+		}
+
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			log.Errorf("failed to parse cert %v", err)
+			continue
+		}
+
+		cert.IPAddresses = []net.IP{net.IPv4(192, 168, 2, 108)}
+		rootCAs.AddCert(cert)
 	}
 
 	// Trust the augmented cert pool in our client
 	return &tls.Config{
-		InsecureSkipVerify: *insecure,
-		RootCAs:            rootCAs,
+		RootCAs: rootCAs,
 	}
 
+}
+
+var DefaultSettings = Settings{
+	Timeout:    5000,
+	BufferSize: 32 * 1024,
 }
 
 // NewWsConnector creates a new instance of WsConnector
 // which connects to the websocket originalServer given by originalServer
 // it assumes the originalServer follows the wsv protocol
-func NewWsConnector(server string) (*WsConnector, error) {
+func NewWsConnector(server string, settings *Settings) (*WsConnector, error) {
 	u, e := parseURL(server)
 	if e != nil {
 		return nil, e
 	}
-	settings := settings{
-		connectTimeout: time.Second * 5,
-		bufferSize:     32 * 1024,
+
+	var cpy = DefaultSettings
+	e = mergo.Merge(&cpy, settings, mergo.WithOverride)
+	if e != nil {
+		panic(fmt.Errorf("merge wsconn settings failed %w", e))
 	}
+
 	dialer := websocket.DefaultDialer
-	dialer.WriteBufferSize = int(settings.bufferSize)
-	dialer.ReadBufferSize = int(settings.bufferSize)
-	if settings.trustedCerts != nil {
-		dialer.TLSClientConfig = trustCert(settings.trustedCerts)
+	dialer.WriteBufferSize = int(cpy.BufferSize)
+	dialer.ReadBufferSize = int(cpy.BufferSize)
+	if cpy.TrustedCerts != nil {
+		dialer.TLSClientConfig = trustCert(cpy.TrustedCerts)
 	}
 	c := &atomic.Value{}
 	c.Store(false)
@@ -171,7 +192,6 @@ func NewWsConnector(server string) (*WsConnector, error) {
 	return &WsConnector{
 		Stats:          newWsConnStats(),
 		udpWs:          &sync.Map{},
-		settings:       settings,
 		kList:          common.NewKillList(),
 		dialLock:       &sync.Mutex{},
 		concurrentMode: c,
