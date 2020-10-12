@@ -1,40 +1,21 @@
-package wsconnector
+package ws
 
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"github.com/eycorsican/go-tun2socks/common/log"
 	"github.com/gorilla/websocket"
 	"github.com/imdario/mergo"
-	"github.com/sunny-lan/wsv/common"
-	"net/http"
+	"github.com/sunny-lan/wsv/wsvmobile/connection"
+	"net"
 	"net/url"
 	"sync"
 	"sync/atomic"
 )
 
-type lockedWs struct {
-	lock *sync.Mutex
-	ws   *websocket.Conn
-}
-
-type Settings struct {
-	//Timeout is the timeout in milliseconds
-	Timeout      int64
-	BufferSize   int64
-	TrustedCerts []byte
-}
-
-//TODO split ws logic with connection logic
-//TODO use errorf for everything
-//WsConnector handles connections from tun converting them to websocket
-type WsConnector struct {
-	Stats *wsConnStats
-
-	udpWs *sync.Map
-	kList common.KillList //TODO use once
-
+type Dialer struct {
 	dialLock       *sync.Mutex
 	concurrentMode *atomic.Value
 	originalServer *url.URL
@@ -42,12 +23,13 @@ type WsConnector struct {
 	dialer         *websocket.Dialer
 }
 
-// msg is a general purpose struct use to send control messages to the originalServer
-// TODO make this more efficient, go streamlined
-type msg struct {
-	ConType string `json:"ConType"`
-	Dst     string `json:"Dst"`
-	Port    int    `json:"Port"`
+func (t *Dialer) Dial() (connection.Connection, error) {
+	c, e := t.dial()
+	if e != nil {
+		return nil, e
+	} else {
+		return newConnection(c), nil
+	}
 }
 
 func parseURL(s string) (*url.URL, error) {
@@ -73,7 +55,7 @@ func parseURL(s string) (*url.URL, error) {
 	return newURL, nil
 }
 
-func (t *WsConnector) dialWs() (*websocket.Conn, *http.Response, error) {
+func (t *Dialer) dial() (*websocket.Conn, error) {
 	if t.concurrentMode.Load() == false {
 		t.dialLock.Lock()
 		defer t.dialLock.Unlock()
@@ -83,7 +65,7 @@ func (t *WsConnector) dialWs() (*websocket.Conn, *http.Response, error) {
 	if e == nil {
 		//connection success, allow concurrent connections
 		t.concurrentMode.Store(true)
-		return ws, resp, nil
+		return ws, nil
 	}
 
 	// dial failed, reset to original server, ban concurrent mode
@@ -101,25 +83,32 @@ func (t *WsConnector) dialWs() (*websocket.Conn, *http.Response, error) {
 
 			newURL, e := parseURL(location)
 			if e != nil {
-				return nil, nil, fmt.Errorf("failed to parse redirect dest %v %w", location, e)
+				return nil, fmt.Errorf("failed to parse redirect dest %v %w", location, e)
 			}
 
 			ws, resp, e = t.dialer.Dial(newURL.String(), nil)
 			if e != nil {
-				return nil, nil, fmt.Errorf("failed to dial redirected url: %v %w", t.workingServer, e)
+				return nil, fmt.Errorf("failed to dial redirected url: %v %w", t.workingServer, e)
 			}
 
 			//connection success, allow concurrent connections
 			log.Infof("redirect success, storing as new location")
 			t.concurrentMode.Store(true)
 			t.workingServer.Store(newURL)
-			return ws, resp, nil
+			return ws, nil
 		} else {
-			return nil, nil, fmt.Errorf("unexpected status code upon dialing (expected redirect): %v", resp)
+			return nil, fmt.Errorf("unexpected status code upon dialing (expected redirect): %v", resp)
 		}
 	} else {
-		return nil, nil, e
+		return nil, e
 	}
+}
+
+type Settings struct {
+	//Timeout is the timeout in milliseconds
+	Timeout      int64
+	BufferSize   int64
+	TrustedCerts []byte
 }
 
 var DefaultSettings = Settings{
@@ -127,10 +116,44 @@ var DefaultSettings = Settings{
 	BufferSize: 32 * 1024,
 }
 
-// NewWsConnector creates a new instance of WsConnector
-// which connects to the websocket originalServer given by originalServer
-// it assumes the originalServer follows the wsv protocol
-func NewWsConnector(server string, settings *Settings) (*WsConnector, error) {
+func trustCert(pemCerts []byte) *tls.Config {
+
+	// Get the SystemCertPool, continue with an empty pool on error
+	rootCAs, _ := x509.SystemCertPool()
+	if rootCAs == nil {
+		rootCAs = x509.NewCertPool()
+	}
+
+	for len(pemCerts) > 0 {
+		var block *pem.Block
+		block, pemCerts = pem.Decode(pemCerts)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			continue
+		}
+
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			log.Errorf("failed to parse cert %v", err)
+			continue
+		}
+
+		cert.IPAddresses = []net.IP{net.IPv4(192, 168, 2, 108)}
+		rootCAs.AddCert(cert)
+	}
+
+	// Trust the augmented cert pool in our client
+	return &tls.Config{
+		RootCAs: rootCAs,
+	}
+
+}
+
+// NewDialer creates a new instance of Dialer
+// it assumes the server follows the wsv protocol
+func NewDialer(server string, settings *Settings) (*Dialer, error) {
 	u, e := parseURL(server)
 	if e != nil {
 		return nil, e
@@ -145,42 +168,18 @@ func NewWsConnector(server string, settings *Settings) (*WsConnector, error) {
 	dialer := websocket.DefaultDialer
 	dialer.WriteBufferSize = int(cpy.BufferSize)
 	dialer.ReadBufferSize = int(cpy.BufferSize)
-	roots := x509.NewCertPool()
 	if cpy.TrustedCerts != nil {
-		roots.AppendCertsFromPEM(cpy.TrustedCerts)
-	}
-	dialer.TLSClientConfig = &tls.Config{
-		InsecureSkipVerify: true,
-		VerifyConnection: func(cs tls.ConnectionState) error {
-			opts := x509.VerifyOptions{
-				Roots:         roots,
-				Intermediates: x509.NewCertPool(),
-			}
-			for _, cert := range cs.PeerCertificates[1:] {
-				opts.Intermediates.AddCert(cert)
-			}
-			_, err := cs.PeerCertificates[0].Verify(opts)
-			return err
-		},
+		dialer.TLSClientConfig = trustCert(cpy.TrustedCerts)
 	}
 	c := &atomic.Value{}
 	c.Store(false)
 	w := &atomic.Value{}
 	w.Store(u)
-	return &WsConnector{
-		Stats:          newWsConnStats(),
-		udpWs:          &sync.Map{},
-		kList:          common.NewKillList(),
+	return &Dialer{
 		dialLock:       &sync.Mutex{},
 		concurrentMode: c,
 		originalServer: u,
 		workingServer:  w,
 		dialer:         dialer,
 	}, nil
-}
-
-// Close closes the WsConnector
-// DOES NOT return internal errors during closing
-func (t WsConnector) Close() {
-	t.kList.KillAll()
 }
